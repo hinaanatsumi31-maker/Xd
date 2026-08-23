@@ -1087,7 +1087,7 @@ task.delay(1, setupRainbowInversedTitle)
 
 local TabMove = UI:CreateTab("Move", "rbxassetid://127654592832194")
 local TabMap = UI:CreateTab("Map", "rbxassetid://108047640113959")
-local TabExtra = UI:CreateTab("Extra", "rbxassetid://0")
+local TabExtra = UI:CreateTab("Extra", "rbxassetid://87314564821705")
 local TabEmote = UI:CreateTab("Emote", "rbxassetid://120302862220435")
 local TabAvatar = UI:CreateTab("Avatar", "Avatar", "rbxassetid://97892611931074")
 
@@ -4344,7 +4344,7 @@ print("\n" .. string.rep("=", 80) .. "\n")
 --// No crea un contenedor ni un layout paralelo: todos los controles visibles
 --// usan directamente Tab:CreateLabel y Tab:CreateButton.
 --// ═════════════════════════════════════════════════════════════════════════════
-local TabAll = UI:CreateTab("All", "All")
+local TabAll = UI:CreateTab("All", "All", "rbxassetid://138091938362842")
 local AllStatus
 local AllCount
 
@@ -4550,10 +4550,15 @@ local function allTestCandidate(candidate)
         return
     end
 
-    local sourceModel = sourceModule:FindFirstChild("CharacterClassic")
+    local characterModel = sourceModule:FindFirstChild("CharacterClassic")
         or sourceModule:FindFirstChild("Character")
-    if not sourceModel or not sourceModel:IsA("Model") then
-        allSetStatus(candidate.name .. " no tiene Character/CharacterClassic")
+    if characterModel then
+        allSetStatus(candidate.name .. " omitido: modelo de personaje de Evade")
+        return
+    end
+    local sourceAura = sourceModule:FindFirstChild("Aura")
+    if not sourceAura or (not sourceAura:IsA("BasePart") and not sourceAura:IsA("Model")) then
+        allSetStatus(candidate.name .. " no tiene objeto Aura compatible")
         return
     end
 
@@ -4564,15 +4569,28 @@ local function allTestCandidate(candidate)
         container.Parent = Workspace
     end
 
-    local ok, clone = pcall(function() return sourceModel:Clone() end)
+    local ok, clone = pcall(function()
+        if sourceAura:IsA("BasePart") then
+            local wrapper = Instance.new("Model")
+            local auraClone = sourceAura:Clone()
+            auraClone.Parent = wrapper
+            wrapper.PrimaryPart = auraClone
+            return wrapper
+        end
+        return sourceAura:Clone()
+    end)
     if not ok or not clone then
         allSetStatus("No se pudo clonar " .. candidate.name)
         return
     end
 
-    clone.Name = candidate.name .. "_VisualOnly"
+    clone.Name = candidate.name .. "_AuraVisualOnly"
     clone.Parent = container
     local hidden, parts, vfx, sounds = allPrepareVisualModel(clone)
+    local carrier = clone:FindFirstChild("Aura", true)
+    if carrier and carrier:IsA("BasePart") then
+        carrier.Transparency = 1
+    end
     local repaired = allRepairInternalJoints(clone)
     local cloneRoot = clone:FindFirstChild("HumanoidRootPart", true)
         or clone:FindFirstChild("Torso", true)
@@ -4601,8 +4619,8 @@ local function allRebuildRows()
         if allMatchesSearch(candidate) then
             shown = shown + 1
             local row = TabAll:CreateButton(
-                candidate.name .. "  •  MODEL",
-                candidate.name .. "  •  MODEL",
+                candidate.name .. "  •  AURA",
+                candidate.name .. "  •  AURA",
                 function() allTestCandidate(candidate) end
             )
             AllRows[#AllRows + 1] = row
@@ -4653,14 +4671,21 @@ local function allDiscoverCandidates()
                 if node and not visited[node] then
                     visited[node] = true
                     if node:IsA("ModuleScript") and allIsCosmeticsPath(node) and not seenModules[node] then
-                        local model = node:FindFirstChild("CharacterClassic")
+                        local characterModel = node:FindFirstChild("CharacterClassic")
                             or node:FindFirstChild("Character")
-                        if model and model:IsA("Model") then
+                        local auraObject = node:FindFirstChild("Aura")
+                        -- Los modelos de personaje completo se excluyen: se
+                        -- sobreponen al avatar. Solo se admite el objeto Aura
+                        -- directo que ya fue confirmado por los scans reales.
+                        if not characterModel
+                            and auraObject
+                            and (auraObject:IsA("BasePart") or auraObject:IsA("Model")) then
                             seenModules[node] = true
                             AllCandidates[#AllCandidates + 1] = {
                                 name = node.Name,
                                 path = allPathOf(node),
                                 module = node,
+                                kind = "aura",
                             }
                         end
                     end
@@ -4999,9 +5024,11 @@ local VisualSyncSetupOk, VisualSyncSetupError = pcall(function()
         local rig, targetRoot = visualRemoteRig(state)
         if playerId == "" or not candidate or not rig or not targetRoot then return false end
         local sourceModule = candidate.module
-        local sourceModel = sourceModule and (sourceModule:FindFirstChild("CharacterClassic")
-            or sourceModule:FindFirstChild("Character"))
-        if not sourceModel or not sourceModel:IsA("Model") then return false end
+        if candidate.kind ~= "aura" then return false end
+        local sourceAura = sourceModule and sourceModule:FindFirstChild("Aura")
+        if not sourceAura or (not sourceAura:IsA("BasePart") and not sourceAura:IsA("Model")) then
+            return false
+        end
 
         local signature = visualSignature("cosmetic", state.visualName, state.variant)
         local existing = visualRemote[playerId] and visualRemote[playerId].cosmetic
@@ -5010,11 +5037,22 @@ local VisualSyncSetupOk, VisualSyncSetupError = pcall(function()
         end
         visualDestroy(playerId, "cosmetic")
 
-        local ok, clone = pcall(function() return sourceModel:Clone() end)
+        local ok, clone = pcall(function()
+            if sourceAura:IsA("BasePart") then
+                local wrapper = Instance.new("Model")
+                local auraClone = sourceAura:Clone()
+                auraClone.Parent = wrapper
+                wrapper.PrimaryPart = auraClone
+                return wrapper
+            end
+            return sourceAura:Clone()
+        end)
         if not ok or not clone then return false end
-        clone.Name = tostring(candidate.name) .. "_RemoteVisualOnly"
+        clone.Name = tostring(candidate.name) .. "_RemoteAuraOnly"
         clone.Parent = Workspace
         local hidden = allPrepareVisualModel(clone)
+        local carrier = clone:FindFirstChild("Aura", true)
+        if carrier and carrier:IsA("BasePart") then carrier.Transparency = 1 end
         allRepairInternalJoints(clone)
         local cloneRoot = clone:FindFirstChild("HumanoidRootPart", true)
             or clone:FindFirstChild("Torso", true)
@@ -5079,7 +5117,7 @@ local VisualSyncSetupOk, VisualSyncSetupError = pcall(function()
 
     local function visualReadOwn()
         local wantedEmote
-        if inEvadeEmote and EmoteState.emoteIdx then
+        if activeVisualTrack and activeVisualTrack.IsPlaying and EmoteState.emoteIdx then
             local selected = EMOTES[EmoteState.emoteIdx]
             if selected then
                 wantedEmote = {
