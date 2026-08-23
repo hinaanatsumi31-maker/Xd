@@ -17,14 +17,6 @@ local Workspace = game:GetService("Workspace")
 local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
---// Visual Sync: declaraciones adelantadas; la implementación queda aislada
---// al final del catálogo All y no modifica la lógica de los efectos locales.
-local VisualSyncEnabled = false
-local visualSyncSetEnabled
-local visualSyncPublishOwn
-local visualSyncRemoveOwn
-local visualSyncStopAllRemote
-
 if not LocalPlayer then
     error("ERROR: No local player available")
     return
@@ -2680,23 +2672,6 @@ TabExtra:CreateSlider(
 TabExtra:CreateLabel("Velocidad normal mientras haces emote", "Normal speed while performing an emote", 11)
 
 TabExtra:CreateDivider()
-TabExtra:CreateLabel("SINCRONIZACIÓN VISUAL", "VISUAL SYNC", 14)
-TabExtra:CreateDivider()
-
-TabExtra:CreateFloatingToggle("Sincronización Visual", "Visual Sync", false, function(state)
-    VisualSyncEnabled = state and true or false
-    if visualSyncSetEnabled then
-        visualSyncSetEnabled(VisualSyncEnabled)
-    end
-end)
-
-TabExtra:CreateLabel(
-    "Permite ver emotes y cosméticos entre usuarios de Yin Yang",
-    "Lets Yin Yang users see each other's emotes and cosmetics",
-    11
-)
-
-TabExtra:CreateDivider()
 TabExtra:CreateLabel("FORZAR SPAWN", "FORCE SPAWN", 14)
 TabExtra:CreateDivider()
 
@@ -2856,9 +2831,6 @@ local function cleanupActiveEmote()
     if activeSoundKillerConn then
         pcall(function() activeSoundKillerConn:Disconnect() end)
         activeSoundKillerConn = nil
-    end
-    if visualSyncRemoveOwn then
-        visualSyncRemoveOwn("emote")
     end
 end
 
@@ -3184,14 +3156,6 @@ local function onEmoteAnimPlayed(anim, track)
             local rig = anim.Parent.Parent
             playEmoteSound(emote, rig)
         end)
-
-        if visualSyncPublishOwn then
-            visualSyncPublishOwn(
-                "emote",
-                emote.emoteKey or emote.emoteName,
-                emote.selectionVariant or ""
-            )
-        end
 
         visualTrack.Stopped:Connect(function()
             activeVisualTrack = nil
@@ -4570,9 +4534,6 @@ local function allRemoveCurrent()
     end
     local existing = Workspace:FindFirstChild("__YY_AllVisualCandidates")
     if existing then pcall(function() existing:Destroy() end) end
-    if visualSyncRemoveOwn then
-        visualSyncRemoveOwn("cosmetic")
-    end
     allSetStatus("Todos los candidatos fueron retirados")
 end
 
@@ -4631,9 +4592,6 @@ local function allTestCandidate(candidate)
     weld.Parent = cloneRoot
     AllCurrentRoot = container
     allSetStatus(candidate.name .. " activo • cuerpo oculto " .. tostring(hidden) .. "/" .. tostring(parts) .. " • VFX " .. tostring(vfx) .. " • joints " .. tostring(repaired) .. " • sonidos " .. tostring(sounds))
-    if visualSyncPublishOwn then
-        visualSyncPublishOwn("cosmetic", candidate.name, "")
-    end
 end
 
 local function allRebuildRows()
@@ -4766,66 +4724,80 @@ if not AllInitOk then
 end
 
 --// ═════════════════════════════════════════════════════════════════════════════
---// VISUAL SYNC — reproducción local coordinada entre usuarios de Yin Yang
---// Comparte solo metadatos con el backend: no envía modelos ni código.
+--// OPTIONAL VISUAL SYNC — aislado después de toda la inicialización original
+--// Si esta sección falla, el cargador ya terminó de construir sus pestañas.
 --// ═════════════════════════════════════════════════════════════════════════════
-do
+local VisualSyncSetupOk, VisualSyncSetupError = pcall(function()
     local VISUAL_SYNC_URL = "https://yin-chat-production-f239.up.railway.app"
     local VISUAL_SYNC_POLL = 4
     local VISUAL_SYNC_REFRESH = 10
+    local VISUAL_SYNC_ATTEMPT_GAP = 3
     local VISUAL_SYNC_MAX_FAILURES = 3
-    local visualOwnState = { emote = nil, cosmetic = nil }
-    local visualOwnLastPublish = { emote = 0, cosmetic = 0 }
+    local VisualSyncEnabled = false
     local visualRemote = {}
+    local visualOwn = {emote = nil, cosmetic = nil}
+    local visualLastAttempt = {emote = 0, cosmetic = 0}
     local visualLastPoll = 0
     local visualFailures = 0
-    local visualSyncStarted = false
 
-    local function visualGetRequestFunction()
-        return (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+    local VisualSyncRequest = (syn and syn.request)
+        or (http and http.request)
+        or fluxus_request
+        or http_request
+        or request
+        or function(options)
+            local method = options.Method or "GET"
+            local ok, body = pcall(function()
+                if method == "POST" then
+                    return HttpService:PostAsync(
+                        options.Url,
+                        options.Body or "",
+                        Enum.HttpContentType.ApplicationJson
+                    )
+                end
+                return HttpService:GetAsync(options.Url)
+            end)
+            return {
+                Success = ok,
+                Body = ok and body or tostring(body),
+                StatusCode = ok and 200 or 0,
+            }
+        end
+
+    local function visualRequest(method, url, payload)
+        local encodedBody = payload and HttpService:JSONEncode(payload) or nil
+        local ok, response = pcall(function()
+            return VisualSyncRequest({
+                Url = url,
+                Method = method,
+                Headers = encodedBody and { ["Content-Type"] = "application/json" } or nil,
+                Body = encodedBody,
+            })
+        end)
+        if not ok or not response then
+            return false, tostring(response or "request failed")
+        end
+        local status = tonumber(response.StatusCode)
+        if response.Success == false or (status and status ~= 0 and status ~= 200) then
+            return false, tostring(response.Body or response.StatusCode or "http failed")
+        end
+        if type(response.Body) ~= "string" then
+            return false, "empty response body"
+        end
+        local decodedOk, decoded = pcall(function()
+            return HttpService:JSONDecode(response.Body)
+        end)
+        if not decodedOk or type(decoded) ~= "table" then
+            return false, "invalid JSON response"
+        end
+        return true, decoded
     end
 
     local function visualUrlEncode(value)
-        local ok, encoded = pcall(function()
-            return KeyHttpService:UrlEncode(tostring(value or ""))
-        end)
-        return ok and encoded or tostring(value or "")
-    end
-
-    local function visualHttp(method, url, body)
-        local requestFunction = visualGetRequestFunction()
-        local requestBody = body and KeyHttpService:JSONEncode(body) or nil
-        local responseBody
-        local statusCode = 200
-
         local ok, result = pcall(function()
-            if requestFunction then
-                local response = requestFunction({
-                    Url = url,
-                    Method = method,
-                    Headers = requestBody and { ["Content-Type"] = "application/json" } or nil,
-                    Body = requestBody,
-                })
-                if not response then error("empty response") end
-                statusCode = tonumber(response.StatusCode) or 0
-                return response.Body
-            end
-            if method == "GET" then
-                return game:HttpGet(url)
-            end
-            error("executor has no POST request function")
+            return HttpService:UrlEncode(tostring(value or ""))
         end)
-        if not ok or statusCode ~= 200 or type(result) ~= "string" then
-            return false, tostring(result or "request failed")
-        end
-
-        local decodedOk, decoded = pcall(function()
-            return KeyHttpService:JSONDecode(result)
-        end)
-        if not decodedOk or type(decoded) ~= "table" then
-            return false, "invalid visual response"
-        end
-        return true, decoded
+        return ok and result or tostring(value or "")
     end
 
     local function visualIdentity()
@@ -4837,28 +4809,29 @@ do
         }
     end
 
-    local function visualStateName(visualType, visualName, variant)
-        return tostring(visualType) .. "|" .. tostring(visualName) .. "|" .. tostring(variant or "")
+    local function visualSignature(kind, name, variant)
+        return tostring(kind) .. "|" .. tostring(name) .. "|" .. tostring(variant or "")
     end
 
-    local function visualPublishState(visualType, visualName, variant, action)
-        if not VisualSyncEnabled then return false end
-        if visualType ~= "emote" and visualType ~= "cosmetic" then return false end
-        if not visualName or tostring(visualName) == "" then return false end
-
+    local function visualPublish(kind, name, variant, action, force)
+        if not VisualSyncEnabled or not name or tostring(name) == "" then return false end
+        local now = tick()
+        if not force and now - visualLastAttempt[kind] < VISUAL_SYNC_ATTEMPT_GAP then
+            return false
+        end
+        visualLastAttempt[kind] = now
         local payload = visualIdentity()
-        payload.visualType = visualType
-        payload.visualName = tostring(visualName)
+        payload.visualType = kind
+        payload.visualName = tostring(name)
         payload.variant = tostring(variant or "")
         payload.action = action or "activate"
-        local ok, result = visualHttp("POST", VISUAL_SYNC_URL .. "/api/visual/publish", payload)
-        if ok and result.success == true then
-            visualOwnState[visualType] = {
+        local ok, data = visualRequest("POST", VISUAL_SYNC_URL .. "/api/visual/publish", payload)
+        if ok and data.success == true then
+            visualOwn[kind] = {
                 name = payload.visualName,
                 variant = payload.variant,
-                signature = visualStateName(visualType, payload.visualName, payload.variant),
+                signature = visualSignature(kind, payload.visualName, payload.variant),
             }
-            visualOwnLastPublish[visualType] = tick()
             visualFailures = 0
             return true
         end
@@ -4866,54 +4839,53 @@ do
         return false
     end
 
-    local function visualPublishOwn(visualType, visualName, variant)
-        return visualPublishState(visualType, visualName, variant, "activate")
-    end
-    visualSyncPublishOwn = visualPublishOwn
-
-    local function visualRemoveOwn(visualType)
-        local previous = visualOwnState[visualType]
-        visualOwnState[visualType] = nil
-        visualOwnLastPublish[visualType] = 0
-        if not previous or not VisualSyncEnabled then return false end
-
+    local function visualRemove(kind)
+        local previous = visualOwn[kind]
+        if not previous then return true end
+        if not VisualSyncEnabled then
+            visualOwn[kind] = nil
+            return false
+        end
+        local now = tick()
+        if now - visualLastAttempt[kind] < VISUAL_SYNC_ATTEMPT_GAP then return false end
+        visualLastAttempt[kind] = now
         local payload = visualIdentity()
-        payload.visualType = visualType
-        local ok, result = visualHttp("POST", VISUAL_SYNC_URL .. "/api/visual/remove", payload)
-        if ok and result.success == true then
+        payload.visualType = kind
+        local ok, data = visualRequest("POST", VISUAL_SYNC_URL .. "/api/visual/remove", payload)
+        if ok and data.success == true then
+            visualOwn[kind] = nil
             visualFailures = 0
             return true
         end
         visualFailures = visualFailures + 1
         return false
     end
-    visualSyncRemoveOwn = visualRemoveOwn
 
-    local function visualFindPlayerName(state)
-        local playerId = tonumber(state and state.playerId)
-        if playerId then
+    local function visualPlayerName(state)
+        local userId = tonumber(state and state.playerId)
+        if userId then
             local ok, player = pcall(function()
-                return Players:GetPlayerByUserId(playerId)
+                return Players:GetPlayerByUserId(userId)
             end)
             if ok and player then return player.Name end
         end
-        return state and tostring(state.playerName or "") or ""
+        return tostring(state and state.playerName or "")
     end
 
-    local function visualGetRemoteRig(state)
-        local name = visualFindPlayerName(state)
+    local function visualRemoteRig(state)
+        local name = visualPlayerName(state)
         if name == "" or name == LocalPlayer.Name then return nil, nil end
         local rigs = Workspace:FindFirstChild("Rigs")
         local rig = rigs and rigs:FindFirstChild(name)
         if not rig then return nil, nil end
-        local targetRoot = rig:FindFirstChild("HumanoidRootPart", true)
+        local root = rig:FindFirstChild("HumanoidRootPart", true)
             or rig:FindFirstChild("Torso", true)
             or rig:FindFirstChild("UpperTorso", true)
             or rig.PrimaryPart
-        return rig, targetRoot
+        return rig, root
     end
 
-    local function visualGetRemoteAnimator(rig)
+    local function visualRemoteAnimator(rig)
         if not rig then return nil end
         local humanoid = rig:FindFirstChildOfClass("Humanoid")
         local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
@@ -4932,9 +4904,7 @@ do
             end
         end
         for _, emote in ipairs(EMOTES) do
-            if tostring(emote.emoteName) == wanted then
-                return emote
-            end
+            if tostring(emote.emoteName) == wanted then return emote end
         end
         return nil
     end
@@ -4947,54 +4917,48 @@ do
         return nil
     end
 
-    local function visualDestroyRemote(playerId, visualType)
+    local function visualDestroy(playerId, kind)
         local bucket = visualRemote[playerId]
-        local entry = bucket and bucket[visualType]
+        local entry = bucket and bucket[kind]
         if not entry then return end
-        if bucket then bucket[visualType] = nil end
-        if not bucket or (not bucket.emote and not bucket.cosmetic) then
-            visualRemote[playerId] = nil
-        end
-
+        bucket[kind] = nil
+        if not bucket.emote and not bucket.cosmetic then visualRemote[playerId] = nil end
         if entry.track then pcall(function() entry.track:Stop(0) end) end
         if entry.fake then pcall(function() entry.fake:Destroy() end) end
-        for _, obj in ipairs(entry.props or {}) do
-            pcall(function() obj:Destroy() end)
+        for _, object in ipairs(entry.props or {}) do
+            pcall(function() object:Destroy() end)
         end
         if entry.model then pcall(function() entry.model:Destroy() end) end
     end
 
-    local function visualDestroyAllRemote()
+    local function visualDestroyAll()
         local ids = {}
         for playerId in pairs(visualRemote) do ids[#ids + 1] = playerId end
         for _, playerId in ipairs(ids) do
-            visualDestroyRemote(playerId, "emote")
-            visualDestroyRemote(playerId, "cosmetic")
+            visualDestroy(playerId, "emote")
+            visualDestroy(playerId, "cosmetic")
         end
     end
-    visualSyncStopAllRemote = visualDestroyAllRemote
 
-    local function visualStoreRemote(playerId, visualType, entry)
+    local function visualStore(playerId, kind, entry)
         visualRemote[playerId] = visualRemote[playerId] or {}
-        visualRemote[playerId][visualType] = entry
-        entry.signature = entry.signature or ""
+        visualRemote[playerId][kind] = entry
     end
 
-    local function visualPlayRemoteEmote(state)
+    local function visualPlayEmote(state)
         local playerId = tostring(state.playerId or "")
         local emote = visualFindEmote(state.visualName, state.variant)
-        local rig = visualGetRemoteRig(state)
-        local animator = visualGetRemoteAnimator(rig)
-        if playerId == "" or not emote or not rig or not animator or emote.animId == "" then
+        local rig = visualRemoteRig(state)
+        local animator = visualRemoteAnimator(rig)
+        if playerId == "" or not emote or emote.animId == "" or not rig or not animator then
             return false
         end
-
-        local signature = visualStateName("emote", state.visualName, state.variant)
+        local signature = visualSignature("emote", state.visualName, state.variant)
         local existing = visualRemote[playerId] and visualRemote[playerId].emote
         if existing and existing.signature == signature and existing.track and existing.track.IsPlaying then
             return true
         end
-        visualDestroyRemote(playerId, "emote")
+        visualDestroy(playerId, "emote")
 
         local fake = Instance.new("Animation")
         fake.AnimationId = emote.animId
@@ -5004,13 +4968,14 @@ do
             return false
         end
 
-        local savedProps = activeProps
+        -- Reutiliza el constructor ya probado y aísla temporalmente su tabla de props.
+        local previousProps = activeProps
         activeProps = {}
         local propsOk = pcall(function() spawnEmoteProps(emote, rig) end)
         local props = activeProps
-        activeProps = savedProps
+        activeProps = previousProps
         if not propsOk then
-            for _, obj in ipairs(props) do pcall(function() obj:Destroy() end) end
+            for _, object in ipairs(props) do pcall(function() object:Destroy() end) end
             pcall(function() track:Stop(0) end)
             pcall(function() fake:Destroy() end)
             return false
@@ -5020,36 +4985,36 @@ do
         if emote.emoteName == "GhoulishGalleon" then track.Looped = true end
         track:Play()
         local entry = {track = track, fake = fake, props = props, signature = signature}
-        visualStoreRemote(playerId, "emote", entry)
+        visualStore(playerId, "emote", entry)
         track.Stopped:Connect(function()
             local current = visualRemote[playerId] and visualRemote[playerId].emote
-            if current == entry then visualDestroyRemote(playerId, "emote") end
+            if current == entry then visualDestroy(playerId, "emote") end
         end)
         return true
     end
 
-    local function visualPlayRemoteCosmetic(state)
+    local function visualPlayCosmetic(state)
         local playerId = tostring(state.playerId or "")
         local candidate = visualFindCandidate(state.visualName)
-        local rig, targetRoot = visualGetRemoteRig(state)
+        local rig, targetRoot = visualRemoteRig(state)
         if playerId == "" or not candidate or not rig or not targetRoot then return false end
         local sourceModule = candidate.module
         local sourceModel = sourceModule and (sourceModule:FindFirstChild("CharacterClassic")
             or sourceModule:FindFirstChild("Character"))
         if not sourceModel or not sourceModel:IsA("Model") then return false end
 
-        local signature = visualStateName("cosmetic", state.visualName, state.variant)
+        local signature = visualSignature("cosmetic", state.visualName, state.variant)
         local existing = visualRemote[playerId] and visualRemote[playerId].cosmetic
         if existing and existing.signature == signature and existing.model and existing.model.Parent then
             return true
         end
-        visualDestroyRemote(playerId, "cosmetic")
+        visualDestroy(playerId, "cosmetic")
 
         local ok, clone = pcall(function() return sourceModel:Clone() end)
         if not ok or not clone then return false end
         clone.Name = tostring(candidate.name) .. "_RemoteVisualOnly"
         clone.Parent = Workspace
-        local hidden, parts = allPrepareVisualModel(clone)
+        local hidden = allPrepareVisualModel(clone)
         allRepairInternalJoints(clone)
         local cloneRoot = clone:FindFirstChild("HumanoidRootPart", true)
             or clone:FindFirstChild("Torso", true)
@@ -5058,7 +5023,6 @@ do
             pcall(function() clone:Destroy() end)
             return false
         end
-
         clone.PrimaryPart = cloneRoot
         pcall(function() clone:PivotTo(targetRoot.CFrame) end)
         local weld = Instance.new("WeldConstraint")
@@ -5066,115 +5030,145 @@ do
         weld.Part0 = cloneRoot
         weld.Part1 = targetRoot
         weld.Parent = cloneRoot
-        visualStoreRemote(playerId, "cosmetic", {
+        visualStore(playerId, "cosmetic", {
             model = clone,
             props = {weld},
             signature = signature,
             hidden = hidden,
-            parts = parts,
         })
         return true
     end
 
-    local function visualApplyState(state)
-        if type(state) ~= "table" or not state.playerId or tostring(state.playerId) == tostring(LocalPlayer.UserId) then
-            return
-        end
+    local function visualApply(state)
+        if type(state) ~= "table" or not state.playerId then return end
+        if tostring(state.playerId) == tostring(LocalPlayer.UserId) then return end
         if state.visualType == "emote" then
-            visualPlayRemoteEmote(state)
+            visualPlayEmote(state)
         elseif state.visualType == "cosmetic" then
-            visualPlayRemoteCosmetic(state)
+            visualPlayCosmetic(state)
         end
     end
 
     local function visualPoll()
         if not VisualSyncEnabled then return end
-        local id = visualIdentity()
+        local identity = visualIdentity()
         local url = VISUAL_SYNC_URL .. "/api/visual/snapshot?placeId="
-            .. visualUrlEncode(id.placeId) .. "&jobId=" .. visualUrlEncode(id.jobId)
-        local ok, result = visualHttp("GET", url)
-        if not ok or result.success ~= true or type(result.states) ~= "table" then
+            .. visualUrlEncode(identity.placeId) .. "&jobId=" .. visualUrlEncode(identity.jobId)
+        local ok, data = visualRequest("GET", url)
+        if not ok or data.success ~= true or type(data.states) ~= "table" then
             visualFailures = visualFailures + 1
+            if visualFailures >= VISUAL_SYNC_MAX_FAILURES then visualDestroyAll() end
             return
         end
         visualFailures = 0
         local present = {}
-        for _, state in ipairs(result.states) do
+        for _, state in ipairs(data.states) do
             local playerId = tostring(state.playerId or "")
-            local visualType = tostring(state.visualType or "")
-            if playerId ~= "" and (visualType == "emote" or visualType == "cosmetic") then
-                present[playerId .. ":" .. visualType] = true
-                visualApplyState(state)
+            local kind = tostring(state.visualType or "")
+            if playerId ~= "" and (kind == "emote" or kind == "cosmetic") then
+                present[playerId .. ":" .. kind] = true
+                visualApply(state)
             end
         end
         for playerId, bucket in pairs(visualRemote) do
-            if not present[playerId .. ":emote"] then visualDestroyRemote(playerId, "emote") end
-            if not present[playerId .. ":cosmetic"] then visualDestroyRemote(playerId, "cosmetic") end
+            if not present[playerId .. ":emote"] then visualDestroy(playerId, "emote") end
+            if not present[playerId .. ":cosmetic"] then visualDestroy(playerId, "cosmetic") end
         end
         visualLastPoll = tick()
     end
 
-    local function visualPublishHeartbeat()
-        if not VisualSyncEnabled then return end
-        local now = tick()
-        for _, visualType in ipairs({"emote", "cosmetic"}) do
-            local state = visualOwnState[visualType]
-            if state and now - visualOwnLastPublish[visualType] >= VISUAL_SYNC_REFRESH then
-                visualPublishState(visualType, state.name, state.variant, "update")
+    local function visualReadOwn()
+        local wantedEmote
+        if inEvadeEmote and EmoteState.emoteIdx then
+            local selected = EMOTES[EmoteState.emoteIdx]
+            if selected then
+                wantedEmote = {
+                    name = selected.emoteKey or selected.emoteName,
+                    variant = selected.selectionVariant or "",
+                }
             end
+        end
+        local currentEmote = visualOwn.emote
+        if wantedEmote then
+            local signature = visualSignature("emote", wantedEmote.name, wantedEmote.variant)
+            if not currentEmote or currentEmote.signature ~= signature
+                or tick() - visualLastAttempt.emote >= VISUAL_SYNC_REFRESH then
+                visualPublish("emote", wantedEmote.name, wantedEmote.variant, currentEmote and "update" or "activate", false)
+            end
+        elseif currentEmote then
+            visualRemove("emote")
+        end
+
+        local wantedCosmetic
+        if AllCurrentRoot then
+            local activeModel = AllCurrentRoot:FindFirstChildWhichIsA("Model")
+            if activeModel then
+                wantedCosmetic = tostring(activeModel.Name):gsub("_VisualOnly$", "")
+            end
+        end
+        local currentCosmetic = visualOwn.cosmetic
+        if wantedCosmetic then
+            local signature = visualSignature("cosmetic", wantedCosmetic, "")
+            if not currentCosmetic or currentCosmetic.signature ~= signature
+                or tick() - visualLastAttempt.cosmetic >= VISUAL_SYNC_REFRESH then
+                visualPublish("cosmetic", wantedCosmetic, "", currentCosmetic and "update" or "activate", false)
+            end
+        elseif currentCosmetic then
+            visualRemove("cosmetic")
         end
     end
 
     local function visualSetEnabled(enabled)
         local nextEnabled = enabled and true or false
         if not nextEnabled then
-            -- Publicar remove mientras el estado aún está habilitado; después
-            -- se apaga localmente para no dejar fantasmas hasta el TTL.
-            visualRemoveOwn("emote")
-            visualRemoveOwn("cosmetic")
+            -- Remove se intenta antes de olvidar cada estado; si falla, el TTL lo expira.
+            visualRemove("emote")
+            visualRemove("cosmetic")
             VisualSyncEnabled = false
-            visualDestroyAllRemote()
+            visualDestroyAll()
             return
         end
         VisualSyncEnabled = true
-        if inEvadeEmote and EmoteState.emoteIdx then
-            local selected = EMOTES[EmoteState.emoteIdx]
-            if selected then
-                visualPublishOwn("emote", selected.emoteKey or selected.emoteName, selected.selectionVariant or "")
-            end
-        end
-        if AllCurrentRoot then
-            local children = AllCurrentRoot:GetChildren()
-            local activeModel = children[1]
-            if activeModel then
-                local name = tostring(activeModel.Name):gsub("_VisualOnly$", "")
-                visualPublishOwn("cosmetic", name, "")
-            end
-        end
+        visualReadOwn()
         visualPoll()
     end
-    visualSyncSetEnabled = visualSetEnabled
+
+    TabExtra:CreateFloatingToggle("Sincronización Visual", "Visual Sync", false, function(state)
+        visualSetEnabled(state)
+        print(state and "[VisualSync] ENABLED" or "[VisualSync] DISABLED")
+    end)
+    TabExtra:CreateLabel(
+        "Reproduce emotes y cosméticos entre usuarios que usan Yin Yang",
+        "Replays emotes and cosmetics between Yin Yang users",
+        11
+    )
 
     task.spawn(function()
         while true do
             task.wait(1)
-            if VisualSyncEnabled then
-                visualPublishHeartbeat()
-                if tick() - visualLastPoll >= VISUAL_SYNC_POLL then
-                    visualPoll()
+            local ok, err = pcall(function()
+                if VisualSyncEnabled then
+                    visualReadOwn()
+                    if tick() - visualLastPoll >= VISUAL_SYNC_POLL then visualPoll() end
                 end
-                if visualFailures >= VISUAL_SYNC_MAX_FAILURES then
-                    visualDestroyAllRemote()
-                end
+            end)
+            if not ok then
+                visualFailures = visualFailures + 1
+                if visualFailures >= VISUAL_SYNC_MAX_FAILURES then visualDestroyAll() end
+                warn("[VisualSync] loop error: " .. tostring(err))
             end
         end
     end)
 
     Players.PlayerRemoving:Connect(function(player)
         local playerId = tostring(player.UserId)
-        visualDestroyRemote(playerId, "emote")
-        visualDestroyRemote(playerId, "cosmetic")
+        visualDestroy(playerId, "emote")
+        visualDestroy(playerId, "cosmetic")
     end)
+end)
+
+if not VisualSyncSetupOk then
+    warn("[VisualSync] opcional no inicializado: " .. tostring(VisualSyncSetupError))
 end
 
 return UI
