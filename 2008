@@ -1,8 +1,5 @@
 --// ═════════════════════════════════════════════════════════════════════════════
---// Este es el contenido que va DENTRO del archivo de GitHub (el que se pide
---// vía loadstring(game:HttpGet("https://raw.githubusercontent.com/.../2008"))()).
---// No es lo que el usuario pega directo: el usuario sigue pegando el one-liner
---// de siempre, que apunta acá.
+--// Contenido para el archivo de GitHub (raw.githubusercontent.com/.../2008)
 --// ═════════════════════════════════════════════════════════════════════════════
 
 local _decoyEndpoints = {
@@ -458,11 +455,35 @@ local _decoyEndpoints = {
     "https://glad-xenon-697.up.railway.app/get-script", "https://quaint-current-prod.up.railway.app/serve", "https://hasty-junction-ba8.up.railway.app/raw/script.lua", "https://taut-nectar-86c9.up.railway.app/loader",
 }
 
---// ═════════════════════════════════════════════════════════════════════════════
---// LÓGICA REAL (nada de la tabla de arriba se usa; es ruido)
---// ═════════════════════════════════════════════════════════════════════════════
+local function _b64d(data)
+    local b = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    data = string.gsub(data, "[^" .. b .. "=]", "")
+    return (data:gsub(".", function(x)
+        if x == "=" then return "" end
+        local r, f = "", (b:find(x) - 1)
+        for i = 6, 1, -1 do r = r .. (f % 2 ^ i - f % 2 ^ (i - 1) > 0 and "1" or "0") end
+        return r
+    end):gsub("%d%d%d?%d?%d?%d?%d?%d?", function(x)
+        if #x ~= 8 then return "" end
+        local c = 0
+        for i = 1, 8 do c = c + (x:sub(i, i) == "1" and 2 ^ (8 - i) or 0) end
+        return string.char(c)
+    end))
+end
 
-local BACKEND_URL = "https://woapz.up.railway.app"
+local function _xord(data, key)
+    local out = {}
+    for i = 1, #data do
+        local k = key[((i - 1) % #key) + 1]
+        out[i] = string.char(bit32.bxor(string.byte(data, i), k))
+    end
+    return table.concat(out)
+end
+
+local _mistyMarsh3638 = "Mrflfx1g7L54ATuz6yEbKu3jbgc2tPB2QDuz4Q=="
+local _k = { 0x5A, 0xC3, 0x91, 0x0F, 0x6E }
+
+local BACKEND_URL = _xord(_b64d(_mistyMarsh3638), _k)
 
 local ok, scriptBody = pcall(function()
     return game:HttpGet(BACKEND_URL .. "/script")
